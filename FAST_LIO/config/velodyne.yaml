@@ -1,0 +1,36 @@
+common:
+    lid_topic: "/livox/lidar"
+    imu_topic: "/iris/imu_gazebo"     # 对应 SDF 插件中的 topic
+    time_sync_en: false             # 仿真环境通常不需要硬件时间同步
+    time_offset_lidar_to_imu: 0.0   # 仿真中时间戳通常是对齐的
+
+preprocess:
+    lidar_type: 2                   # 重点：必须设为2。因为你用的是Velodyne插件，发的是通用PointCloud2格式
+    scan_line: 32                   # 对应 SDF <vertical><samples>32
+    scan_rate: 15                   # 对应 SDF <update_rate>15
+    timestamp_unit: 1               # 通常仿真输出是秒或毫秒，如果报错可尝试改为 0 或 2
+    blind: 0.5                      # 对应 SDF <min>0.31，设大一点滤除车身遮挡
+
+mapping:
+    acc_cov: 0.01                   # 根据仿真SDF的噪声参数适当调小，仿真数据较干净
+    gyr_cov: 0.01
+    b_acc_cov: 0.0001
+    b_gyr_cov: 0.0001
+    fov_degree:    360              # 仿真雷达通常是全向的
+    det_range:     100.0
+    extrinsic_est_en:  false        # 仿真中外参是已知且固定的，建议关闭在线估计
+    extrinsic_T: [-0.05, 0, -0.22]     # 计算方式：雷达高度(0.11) - IMU高度(0.05) = 0.06
+    extrinsic_R: [ 1, 0, 0,
+                   0, 1, 0,
+                   0, 0, 1]
+
+publish:
+    path_en:  true                  # 开启路径发布，方便在Rviz看轨迹
+    scan_publish_en:  true          # 发布配准后的点云
+    dense_publish_en: true          
+    scan_bodyframe_pub_en: true     # 发布基于车身坐标系的点云
+    tf_en: false                    # false: 不发布 camera_init -> body 的 TF
+
+pcd_save:
+    pcd_save_en: false              # 仿真调试建议先关闭，避免生成大量文件卡顿
+    interval: -1
