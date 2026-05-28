@@ -1,0 +1,73 @@
+<launch>
+    <!--
+        MID360 FAST-LIO 点云独立坐标转换节点。
+
+        这个节点只做点云转换：
+        /cloud_registered -> /cloud_registered_aligned
+
+        它不发布 /mavros/vision_pose/pose，也不参与 PX4 定位发送。
+        这样即使点云很大，也不会阻塞 lidar_to_mavros 的位姿发送链路。
+
+        三种模式：
+        - imu_auto：默认，启动时静止采样 /livox/imu，自动计算 roll/pitch 旋转补偿，yaw 不补偿。
+        - fixed：使用 world_roll/world_pitch/world_yaw 固定角度补偿。
+        - none：不旋转，只按 zero_origin 决定是否平移归零，用于对照原始 FAST-LIO 点云。
+
+        注意：
+        点云节点不使用 mount_pitch。
+        mount_pitch 是位姿节点里“雷达 pose -> 无人机机体 pose”的安装外参；
+        /cloud_registered 已经是 FAST-LIO world 点云，这里只做 world 坐标对齐。
+    -->
+
+    <!-- 输入/输出 topic。 -->
+    <arg name="cloud_topic" default="/cloud_registered"/>
+    <arg name="aligned_cloud_topic" default="/cloud_registered_aligned"/>
+    <arg name="imu_topic" default="/livox/imu"/>
+    <arg name="odom_topic" default="/Odom_high_freq"/>
+    <arg name="output_frame_id" default="world"/>
+
+    <!-- 坐标旋转模式：imu_auto=自动；fixed=固定角；none=不旋转。 -->
+    <arg name="align_mode" default="imu_auto"/>
+
+    <!-- 固定角补偿参数。只有 align_mode:=fixed 时使用。 -->
+    <arg name="world_x" default="0.0"/>
+    <arg name="world_y" default="0.0"/>
+    <arg name="world_z" default="0.0"/>
+    <arg name="world_roll" default="0.0"/>
+    <arg name="world_pitch" default="0.0"/>
+    <arg name="world_yaw" default="0.0"/>
+
+    <!-- zero_origin=true 表示用第一帧 FAST-LIO odom 作为点云零点，对齐 PX4 local/EGO 的局部坐标起点。 -->
+    <arg name="zero_origin" default="true"/>
+
+    <!-- print_debug=true 时每秒打印一次点云转换状态；总启动文件默认关闭，避免和位姿坐标表抢终端输出。 -->
+    <arg name="print_debug" default="false"/>
+
+    <!-- IMU 自动校准参数：启动静止采样时间、最少样本数、允许的 roll/pitch 抖动阈值。 -->
+    <arg name="startup_align_duration" default="2.0"/>
+    <arg name="min_align_samples" default="50"/>
+    <arg name="max_align_rpy_stddev_deg" default="3.0"/>
+
+    <node name="fastlio_cloud_align" pkg="lidar_to_mavros" type="fastlio_cloud_align" output="screen">
+        <param name="cloud_topic" value="$(arg cloud_topic)"/>
+        <param name="aligned_cloud_topic" value="$(arg aligned_cloud_topic)"/>
+        <param name="imu_topic" value="$(arg imu_topic)"/>
+        <param name="odom_topic" value="$(arg odom_topic)"/>
+        <param name="output_frame_id" value="$(arg output_frame_id)"/>
+
+        <param name="align_mode" value="$(arg align_mode)"/>
+
+        <param name="world_x" value="$(arg world_x)"/>
+        <param name="world_y" value="$(arg world_y)"/>
+        <param name="world_z" value="$(arg world_z)"/>
+        <param name="world_roll" value="$(arg world_roll)"/>
+        <param name="world_pitch" value="$(arg world_pitch)"/>
+        <param name="world_yaw" value="$(arg world_yaw)"/>
+
+        <param name="zero_origin" value="$(arg zero_origin)"/>
+        <param name="print_debug" value="$(arg print_debug)"/>
+        <param name="startup_align_duration" value="$(arg startup_align_duration)"/>
+        <param name="min_align_samples" value="$(arg min_align_samples)"/>
+        <param name="max_align_rpy_stddev_deg" value="$(arg max_align_rpy_stddev_deg)"/>
+    </node>
+</launch>

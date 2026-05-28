@@ -11,10 +11,10 @@ find_package(catkin REQUIRED COMPONENTS
 roscpp
 nav_msgs
 geometry_msgs
+sensor_msgs
+tf2
+tf2_geometry_msgs
 )
-
-## System dependencies are found with CMake's conventions
-find_package(Eigen3 REQUIRED)
 
 ## Uncomment this if the package has a setup.py. This macro ensures
 ## modules and global scripts declared therein get installed
@@ -30,10 +30,7 @@ find_package(Eigen3 REQUIRED)
 ## CATKIN_DEPENDS: catkin_packages dependent projects also need
 ## DEPENDS: system dependencies of this project that dependent projects also need
 catkin_package(
-INCLUDE_DIRS include
-LIBRARIES lidar_to_mavros
-CATKIN_DEPENDS roscpp nav_msgs geometry_msgs
-DEPENDS Eigen3
+  CATKIN_DEPENDS roscpp nav_msgs geometry_msgs sensor_msgs tf2 tf2_geometry_msgs
 )
 
 ###########
@@ -43,13 +40,12 @@ DEPENDS Eigen3
 ## Specify additional locations of header files
 ## Your package locations should be listed before other locations
 include_directories(
-include
-${catkin_INCLUDE_DIRS}
-${EIGEN3_INCLUDE_DIRS}
+  ${catkin_INCLUDE_DIRS}
 )
 
 ## Declare a C++ executable
 add_executable(lidar_to_mavros src/lidar_to_mavros.cpp)
+add_executable(fastlio_cloud_align src/fastlio_cloud_align.cpp)
 
 ## Add cmake target dependencies of the executable
 ## same as for the library above
@@ -57,5 +53,9 @@ add_executable(lidar_to_mavros src/lidar_to_mavros.cpp)
 
 ## Specify libraries to link a library or executable target against
 target_link_libraries(lidar_to_mavros
+${catkin_LIBRARIES}
+)
+
+target_link_libraries(fastlio_cloud_align
 ${catkin_LIBRARIES}
 )

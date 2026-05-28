@@ -1,23 +1,26 @@
 #include <algorithm>
 #include <cmath>
 #include <iomanip>
-#include <iostream>
+#include <limits>
+#include <mutex>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 
-#include <geometry_msgs/PoseStamped.h>
 #include <nav_msgs/Odometry.h>
 #include <ros/ros.h>
 #include <sensor_msgs/Imu.h>
+#include <sensor_msgs/PointCloud2.h>
+#include <sensor_msgs/point_cloud2_iterator.h>
 #include <tf2/LinearMath/Matrix3x3.h>
 #include <tf2/LinearMath/Quaternion.h>
 #include <tf2/LinearMath/Transform.h>
 #include <tf2_geometry_msgs/tf2_geometry_msgs.h>
 
-class LidarToMavros
+class FastlioCloudAlign
 {
 public:
-    LidarToMavros(const ros::NodeHandle &nh, const ros::NodeHandle &pnh);
+    FastlioCloudAlign(const ros::NodeHandle &nh, const ros::NodeHandle &pnh);
     void spin();
 
 private:
@@ -28,14 +31,14 @@ private:
         IMU_AUTO
     };
 
-    struct AttitudeDeg
+    struct AttitudeRad
     {
         double roll = 0.0;
         double pitch = 0.0;
         double yaw = 0.0;
     };
 
-    struct AttitudeRad
+    struct AttitudeDeg
     {
         double roll = 0.0;
         double pitch = 0.0;
@@ -44,38 +47,37 @@ private:
 
     ros::NodeHandle nh_;
     ros::NodeHandle pnh_;
-    ros::Subscriber odomSub_;
+    ros::Subscriber cloudSub_;
     ros::Subscriber imuSub_;
-    ros::Subscriber px4PoseSub_;
-    ros::Publisher visionPosePub_;
+    ros::Subscriber odomSub_;
+    ros::Publisher alignedCloudPub_;
+    mutable std::mutex stateMutex_;
 
-    std::string odomTopic_;
+    std::string cloudTopic_;
+    std::string alignedCloudTopic_;
     std::string imuTopic_;
-    std::string visionPoseTopic_;
+    std::string odomTopic_;
     std::string outputFrameId_;
     std::string alignModeName_;
     AlignMode alignMode_ = AlignMode::IMU_AUTO;
 
-    tf2::Transform sensorToBase_;
     tf2::Transform fixedWorldAlign_;
     tf2::Transform activeWorldAlign_;
     tf2::Vector3 originPosition_;
-
-    geometry_msgs::PoseStamped lastPx4Pose_;
-    AttitudeDeg estimatedAttitude_;
-    AttitudeDeg px4Attitude_;
+    tf2::Vector3 pendingOriginPosition_;
 
     bool zeroOrigin_ = true;
     bool printDebug_ = true;
-    bool odomReceived_ = false;
+    bool cloudReceived_ = false;
     bool imuReceived_ = false;
-    bool originInitialized_ = false;
+    bool odomReceived_ = false;
     bool alignReady_ = false;
     bool alignStatsActive_ = false;
-    bool px4PoseReceived_ = false;
-    bool consoleTablePrinted_ = false;
-    bool waitingOdomWarned_ = false;
+    bool originInitialized_ = false;
+    bool pendingOriginValid_ = false;
+    bool waitingCloudWarned_ = false;
     bool waitingImuWarned_ = false;
+    bool waitingOdomWarned_ = false;
     bool waitingAlignWarned_ = false;
 
     double alignDuration_ = 2.0;
@@ -93,30 +95,31 @@ private:
 
     static tf2::Transform makeTransform(double x, double y, double z,
                                         double roll, double pitch, double yaw);
-    static AttitudeDeg toAttitudeDeg(const tf2::Quaternion &q);
     static double radToDeg(double value);
     static double clampVariance(double value);
     static std::string modeToString(AlignMode mode);
+    static AttitudeDeg toAttitudeDeg(const tf2::Quaternion &q);
     static void printLine();
 
-    void odomCallback(const nav_msgs::Odometry::ConstPtr &msg);
+    void cloudCallback(const sensor_msgs::PointCloud2::ConstPtr &msg);
     void imuCallback(const sensor_msgs::Imu::ConstPtr &msg);
-    void px4PoseCallback(const geometry_msgs::PoseStamped::ConstPtr &msg);
+    void odomCallback(const nav_msgs::Odometry::ConstPtr &msg);
     void resetImuAlignmentStats(const ros::Time &stamp);
     bool imuSampleToLevelRpy(const sensor_msgs::Imu &msg, AttitudeRad &rpy, std::string &source) const;
     void collectImuAlignmentSample(const sensor_msgs::Imu &msg, const ros::Time &stamp);
     bool tryLockImuAlignment(const ros::Time &stamp);
-    void publishPose(const tf2::Transform &rawWorldToBase, const ros::Time &stamp);
-    tf2::Transform outputTransform(const tf2::Transform &rawWorldToBase) const;
-    void printStartupSummary(double mountX, double mountY, double mountZ,
-                             double mountRoll, double mountPitch, double mountYaw,
-                             double worldX, double worldY, double worldZ,
-                             const AttitudeDeg &fixedRpy) const;
-    void printDebug(const geometry_msgs::PoseStamped &pose);
+    bool ensureOriginReady();
+    bool getCloudTransform(tf2::Transform &worldAlign, tf2::Vector3 &origin);
+    bool transformCloud(const sensor_msgs::PointCloud2 &input,
+                        sensor_msgs::PointCloud2 &output,
+                        const tf2::Transform &worldAlign,
+                        const tf2::Vector3 &origin) const;
+    void printStartupSummary(double worldX, double worldY, double worldZ, const AttitudeDeg &fixedRpy) const;
+    void printDebug(const sensor_msgs::PointCloud2 &output, int transformedCount, int skippedCount) const;
 };
 
-tf2::Transform LidarToMavros::makeTransform(double x, double y, double z,
-                                            double roll, double pitch, double yaw)
+tf2::Transform FastlioCloudAlign::makeTransform(double x, double y, double z,
+                                                double roll, double pitch, double yaw)
 {
     tf2::Quaternion q;
     q.setRPY(roll, pitch, yaw);
@@ -124,17 +127,17 @@ tf2::Transform LidarToMavros::makeTransform(double x, double y, double z,
     return tf2::Transform(q, tf2::Vector3(x, y, z));
 }
 
-double LidarToMavros::radToDeg(double value)
+double FastlioCloudAlign::radToDeg(double value)
 {
     return value * 180.0 / M_PI;
 }
 
-double LidarToMavros::clampVariance(double value)
+double FastlioCloudAlign::clampVariance(double value)
 {
     return std::max(0.0, value);
 }
 
-std::string LidarToMavros::modeToString(AlignMode mode)
+std::string FastlioCloudAlign::modeToString(AlignMode mode)
 {
     switch (mode)
     {
@@ -148,12 +151,7 @@ std::string LidarToMavros::modeToString(AlignMode mode)
     return "unknown";
 }
 
-void LidarToMavros::printLine()
-{
-    ROS_INFO_STREAM("------------------------------------------------------------");
-}
-
-LidarToMavros::AttitudeDeg LidarToMavros::toAttitudeDeg(const tf2::Quaternion &q)
+FastlioCloudAlign::AttitudeDeg FastlioCloudAlign::toAttitudeDeg(const tf2::Quaternion &q)
 {
     double roll = 0.0;
     double pitch = 0.0;
@@ -167,15 +165,14 @@ LidarToMavros::AttitudeDeg LidarToMavros::toAttitudeDeg(const tf2::Quaternion &q
     return attitude;
 }
 
-LidarToMavros::LidarToMavros(const ros::NodeHandle &nh, const ros::NodeHandle &pnh)
+void FastlioCloudAlign::printLine()
+{
+    ROS_INFO_STREAM("------------------------------------------------------------");
+}
+
+FastlioCloudAlign::FastlioCloudAlign(const ros::NodeHandle &nh, const ros::NodeHandle &pnh)
     : nh_(nh), pnh_(pnh)
 {
-    double mountX = 0.0;
-    double mountY = 0.0;
-    double mountZ = 0.0;
-    double mountRoll = 0.0;
-    double mountPitch = 0.0;
-    double mountYaw = 0.0;
     double worldX = 0.0;
     double worldY = 0.0;
     double worldZ = 0.0;
@@ -184,18 +181,12 @@ LidarToMavros::LidarToMavros(const ros::NodeHandle &nh, const ros::NodeHandle &p
     double worldYaw = 0.0;
     std::string alignMode;
 
-    pnh_.param<std::string>("odom_topic", odomTopic_, "/Odom_high_freq");
+    pnh_.param<std::string>("cloud_topic", cloudTopic_, "/cloud_registered");
+    pnh_.param<std::string>("aligned_cloud_topic", alignedCloudTopic_, "/cloud_registered_aligned");
     pnh_.param<std::string>("imu_topic", imuTopic_, "/livox/imu");
-    pnh_.param<std::string>("vision_pose_topic", visionPoseTopic_, "/fastlio/base_link_pose_debug");
-    pnh_.param<std::string>("output_frame_id", outputFrameId_, "odom");
+    pnh_.param<std::string>("odom_topic", odomTopic_, "/Odom_high_freq");
+    pnh_.param<std::string>("output_frame_id", outputFrameId_, "world");
     pnh_.param<std::string>("align_mode", alignMode, "imu_auto");
-
-    pnh_.param<double>("mount_x", mountX, 0.0);
-    pnh_.param<double>("mount_y", mountY, 0.0);
-    pnh_.param<double>("mount_z", mountZ, 0.0);
-    pnh_.param<double>("mount_roll", mountRoll, 0.0);
-    pnh_.param<double>("mount_pitch", mountPitch, 0.0);
-    pnh_.param<double>("mount_yaw", mountYaw, 0.0);
 
     pnh_.param<double>("world_x", worldX, 0.0);
     pnh_.param<double>("world_y", worldY, 0.0);
@@ -230,17 +221,14 @@ LidarToMavros::LidarToMavros(const ros::NodeHandle &nh, const ros::NodeHandle &p
     }
     else
     {
-        ROS_WARN_STREAM("lidar_to_mavros: unknown align_mode='" << alignMode
+        ROS_WARN_STREAM("fastlio_cloud_align: unknown align_mode='" << alignMode
                         << "', falling back to imu_auto");
         alignMode_ = AlignMode::IMU_AUTO;
         alignReady_ = false;
     }
     alignModeName_ = modeToString(alignMode_);
 
-    const tf2::Transform baseToSensor = makeTransform(mountX, mountY, mountZ, mountRoll, mountPitch, mountYaw);
-    sensorToBase_ = baseToSensor.inverse();
     fixedWorldAlign_ = makeTransform(worldX, worldY, worldZ, worldRoll, worldPitch, worldYaw);
-
     if (alignMode_ == AlignMode::FIXED)
     {
         activeWorldAlign_ = fixedWorldAlign_;
@@ -250,74 +238,49 @@ LidarToMavros::LidarToMavros(const ros::NodeHandle &nh, const ros::NodeHandle &p
         activeWorldAlign_.setIdentity();
     }
 
-    px4PoseSub_ = nh_.subscribe<geometry_msgs::PoseStamped>(
-        "mavros/local_position/pose", 10, &LidarToMavros::px4PoseCallback, this);
+    cloudSub_ = nh_.subscribe<sensor_msgs::PointCloud2>(
+        cloudTopic_, 2, &FastlioCloudAlign::cloudCallback, this);
     odomSub_ = nh_.subscribe<nav_msgs::Odometry>(
-        odomTopic_, 20, &LidarToMavros::odomCallback, this);
+        odomTopic_, 20, &FastlioCloudAlign::odomCallback, this);
     if (alignMode_ == AlignMode::IMU_AUTO)
     {
         imuSub_ = nh_.subscribe<sensor_msgs::Imu>(
-            imuTopic_, 100, &LidarToMavros::imuCallback, this);
+            imuTopic_, 100, &FastlioCloudAlign::imuCallback, this);
     }
-    visionPosePub_ = nh_.advertise<geometry_msgs::PoseStamped>(visionPoseTopic_, 10);
+    alignedCloudPub_ = nh_.advertise<sensor_msgs::PointCloud2>(alignedCloudTopic_, 2);
 
-    printStartupSummary(mountX, mountY, mountZ,
-                        mountRoll, mountPitch, mountYaw,
-                        worldX, worldY, worldZ,
-                        toAttitudeDeg(fixedWorldAlign_.getRotation()));
+    printStartupSummary(worldX, worldY, worldZ, toAttitudeDeg(fixedWorldAlign_.getRotation()));
 
     if (alignMode_ == AlignMode::IMU_AUTO)
     {
-        ROS_INFO_STREAM("Alignment: waiting for " << imuTopic_
-                        << ". Keep the vehicle static and level. PX4 output is blocked until lock.");
+        ROS_INFO_STREAM("Cloud alignment: waiting for " << imuTopic_
+                        << ". Keep the vehicle static and level. Cloud output is blocked until lock.");
     }
     else if (alignMode_ == AlignMode::FIXED)
     {
-        ROS_INFO_STREAM("Alignment: fixed world rotation is active. IMU auto alignment is skipped.");
+        ROS_INFO_STREAM("Cloud alignment: fixed world rotation is active. IMU auto alignment is skipped.");
     }
     else
     {
-        ROS_INFO_STREAM("Alignment: disabled. FAST-LIO coordinates are published directly.");
+        ROS_INFO_STREAM("Cloud alignment: disabled. FAST-LIO cloud coordinates are passed through with optional zero origin.");
     }
 }
 
-void LidarToMavros::px4PoseCallback(const geometry_msgs::PoseStamped::ConstPtr &msg)
+void FastlioCloudAlign::odomCallback(const nav_msgs::Odometry::ConstPtr &msg)
 {
-    lastPx4Pose_ = *msg;
-    px4PoseReceived_ = true;
-
-    tf2::Quaternion q;
-    tf2::fromMsg(msg->pose.orientation, q);
-    px4Attitude_ = toAttitudeDeg(q);
-}
-
-void LidarToMavros::odomCallback(const nav_msgs::Odometry::ConstPtr &msg)
-{
+    std::lock_guard<std::mutex> lock(stateMutex_);
     odomReceived_ = true;
 
-    if (!alignReady_)
-    {
-        if (!waitingAlignWarned_)
-        {
-            ROS_INFO_STREAM("Status: received " << odomTopic_
-                            << ", waiting for IMU alignment before publishing "
-                            << visionPoseTopic_);
-            waitingAlignWarned_ = true;
-        }
-        return;
-    }
-
-    const ros::Time stamp = msg->header.stamp.isZero() ? ros::Time::now() : msg->header.stamp;
-
-    tf2::Transform worldToSensor;
-    tf2::fromMsg(msg->pose.pose, worldToSensor);
-    const tf2::Transform rawWorldToBase = worldToSensor * sensorToBase_;
-
-    publishPose(rawWorldToBase, stamp);
+    tf2::Vector3 rawPosition(msg->pose.pose.position.x,
+                             msg->pose.pose.position.y,
+                             msg->pose.pose.position.z);
+    pendingOriginPosition_ = activeWorldAlign_ * rawPosition;
+    pendingOriginValid_ = true;
 }
 
-void LidarToMavros::imuCallback(const sensor_msgs::Imu::ConstPtr &msg)
+void FastlioCloudAlign::imuCallback(const sensor_msgs::Imu::ConstPtr &msg)
 {
+    std::lock_guard<std::mutex> lock(stateMutex_);
     imuReceived_ = true;
 
     if (alignMode_ != AlignMode::IMU_AUTO || alignReady_)
@@ -329,7 +292,44 @@ void LidarToMavros::imuCallback(const sensor_msgs::Imu::ConstPtr &msg)
     collectImuAlignmentSample(*msg, stamp);
 }
 
-void LidarToMavros::resetImuAlignmentStats(const ros::Time &stamp)
+void FastlioCloudAlign::cloudCallback(const sensor_msgs::PointCloud2::ConstPtr &msg)
+{
+    {
+        std::lock_guard<std::mutex> lock(stateMutex_);
+        cloudReceived_ = true;
+        if (!alignReady_)
+        {
+            if (!waitingAlignWarned_)
+            {
+                ROS_INFO_STREAM("Cloud received, waiting for alignment before publishing " << alignedCloudTopic_);
+                waitingAlignWarned_ = true;
+            }
+            return;
+        }
+    }
+
+    tf2::Transform worldAlign;
+    tf2::Vector3 origin;
+    if (!getCloudTransform(worldAlign, origin))
+    {
+        return;
+    }
+
+    sensor_msgs::PointCloud2 output;
+    if (!transformCloud(*msg, output, worldAlign, origin))
+    {
+        return;
+    }
+
+    alignedCloudPub_.publish(output);
+
+    if (printDebug_)
+    {
+        printDebug(output, static_cast<int>(output.width * output.height), 0);
+    }
+}
+
+void FastlioCloudAlign::resetImuAlignmentStats(const ros::Time &stamp)
 {
     alignStatsActive_ = true;
     alignStartStamp_ = stamp;
@@ -342,7 +342,9 @@ void LidarToMavros::resetImuAlignmentStats(const ros::Time &stamp)
     sumPitch2_ = 0.0;
 }
 
-bool LidarToMavros::imuSampleToLevelRpy(const sensor_msgs::Imu &msg, AttitudeRad &rpy, std::string &source) const
+bool FastlioCloudAlign::imuSampleToLevelRpy(const sensor_msgs::Imu &msg,
+                                            AttitudeRad &rpy,
+                                            std::string &source) const
 {
     const geometry_msgs::Quaternion &qmsg = msg.orientation;
     const double qNorm2 = qmsg.x * qmsg.x + qmsg.y * qmsg.y + qmsg.z * qmsg.z + qmsg.w * qmsg.w;
@@ -376,7 +378,7 @@ bool LidarToMavros::imuSampleToLevelRpy(const sensor_msgs::Imu &msg, AttitudeRad
     return false;
 }
 
-void LidarToMavros::collectImuAlignmentSample(const sensor_msgs::Imu &msg, const ros::Time &stamp)
+void FastlioCloudAlign::collectImuAlignmentSample(const sensor_msgs::Imu &msg, const ros::Time &stamp)
 {
     if (!alignStatsActive_ || stamp < alignStartStamp_)
     {
@@ -387,7 +389,7 @@ void LidarToMavros::collectImuAlignmentSample(const sensor_msgs::Imu &msg, const
     std::string source;
     if (!imuSampleToLevelRpy(msg, sample, source))
     {
-        ROS_WARN_STREAM_THROTTLE(1.0, "lidar_to_mavros: IMU sample has no valid orientation or acceleration");
+        ROS_WARN_STREAM_THROTTLE(1.0, "fastlio_cloud_align: IMU sample has no valid orientation or acceleration");
         return;
     }
 
@@ -408,7 +410,7 @@ void LidarToMavros::collectImuAlignmentSample(const sensor_msgs::Imu &msg, const
     const double elapsed = (stamp - alignStartStamp_).toSec();
     const double progress = std::min(100.0, elapsed / alignDuration_ * 100.0);
     ROS_INFO_STREAM_THROTTLE(1.0, std::fixed << std::setprecision(2)
-                                            << "Align progress: " << progress << "%  "
+                                            << "Cloud align progress: " << progress << "%  "
                                             << elapsed << "/" << alignDuration_
                                             << "s  samples=" << alignSampleCount_
                                             << "  current IMU roll/pitch=["
@@ -421,8 +423,9 @@ void LidarToMavros::collectImuAlignmentSample(const sensor_msgs::Imu &msg, const
     }
 }
 
-bool LidarToMavros::tryLockImuAlignment(const ros::Time &stamp)
+bool FastlioCloudAlign::tryLockImuAlignment(const ros::Time &stamp)
 {
+    (void)stamp;
     const double n = static_cast<double>(alignSampleCount_);
     const double meanRoll = sumRoll_ / n;
     const double meanPitch = sumPitch_ / n;
@@ -433,11 +436,11 @@ bool LidarToMavros::tryLockImuAlignment(const ros::Time &stamp)
 
     if (rollStddevDeg > maxAlignRpyStddevDeg_ || pitchStddevDeg > maxAlignRpyStddevDeg_)
     {
-        ROS_WARN_STREAM("Alignment rejected: IMU roll/pitch is not stable enough. Retrying."
+        ROS_WARN_STREAM("Cloud alignment rejected: IMU roll/pitch is not stable enough. Retrying."
                         << " roll_std=" << rollStddevDeg
                         << " deg, pitch_std=" << pitchStddevDeg
                         << " deg, threshold=" << maxAlignRpyStddevDeg_ << " deg");
-        resetImuAlignmentStats(stamp);
+        resetImuAlignmentStats(ros::Time::now());
         return false;
     }
 
@@ -449,15 +452,16 @@ bool LidarToMavros::tryLockImuAlignment(const ros::Time &stamp)
     alignReady_ = true;
     alignStatsActive_ = false;
     originInitialized_ = false;
+    pendingOriginValid_ = false;
 
     const AttitudeDeg alignRpy = toAttitudeDeg(autoAlignQ);
     printLine();
-    ROS_INFO_STREAM("Alignment locked: imu alignment locked");
+    ROS_INFO_STREAM("Cloud alignment locked");
     ROS_INFO_STREAM(std::fixed << std::setprecision(4)
                     << "IMU initial roll/pitch/yaw = ["
                     << radToDeg(meanRoll) << ", " << radToDeg(meanPitch) << ", 0.0000] deg");
     ROS_INFO_STREAM(std::fixed << std::setprecision(4)
-                    << "Auto world align roll/pitch/yaw = ["
+                    << "Cloud world align roll/pitch/yaw = ["
                     << alignRpy.roll << ", " << alignRpy.pitch << ", " << alignRpy.yaw << "] deg");
     ROS_INFO_STREAM(std::fixed << std::setprecision(4)
                     << "samples=" << alignSampleCount_
@@ -465,73 +469,114 @@ bool LidarToMavros::tryLockImuAlignment(const ros::Time &stamp)
                     << "  acceleration=" << accelSampleCount_
                     << "  roll_std=" << rollStddevDeg
                     << " deg  pitch_std=" << pitchStddevDeg << " deg");
-    ROS_INFO_STREAM("Publishing starts now: " << visionPoseTopic_);
+    ROS_INFO_STREAM("Cloud publishing starts after odom origin is available: " << alignedCloudTopic_);
     printLine();
     return true;
 }
 
-tf2::Transform LidarToMavros::outputTransform(const tf2::Transform &rawWorldToBase) const
+bool FastlioCloudAlign::ensureOriginReady()
 {
-    return activeWorldAlign_ * rawWorldToBase;
-}
-
-void LidarToMavros::publishPose(const tf2::Transform &rawWorldToBase, const ros::Time &stamp)
-{
-    const tf2::Transform worldToBase = outputTransform(rawWorldToBase);
-
-    if (!originInitialized_)
+    if (!zeroOrigin_)
     {
-        originPosition_ = worldToBase.getOrigin();
-        originInitialized_ = true;
-        ROS_INFO_STREAM(std::fixed << std::setprecision(4)
-                        << "Zero origin: origin xyz = ["
-                        << originPosition_.x() << ", "
-                        << originPosition_.y() << ", "
-                        << originPosition_.z() << "]");
+        if (!originInitialized_)
+        {
+            originPosition_.setValue(0.0, 0.0, 0.0);
+            originInitialized_ = true;
+        }
+        return true;
     }
 
-    const tf2::Vector3 outputPosition = zeroOrigin_
-                                            ? worldToBase.getOrigin() - originPosition_
-                                            : worldToBase.getOrigin();
-
-    geometry_msgs::PoseStamped pose;
-    pose.header.stamp = stamp;
-    pose.header.frame_id = outputFrameId_;
-    pose.pose.position.x = outputPosition.x();
-    pose.pose.position.y = outputPosition.y();
-    pose.pose.position.z = outputPosition.z();
-    pose.pose.orientation = tf2::toMsg(worldToBase.getRotation());
-
-    estimatedAttitude_ = toAttitudeDeg(worldToBase.getRotation());
-    visionPosePub_.publish(pose);
-
-    if (printDebug_)
+    if (originInitialized_)
     {
-        printDebug(pose);
+        return true;
     }
+
+    if (!pendingOriginValid_)
+    {
+        ROS_INFO_STREAM_THROTTLE(1.0, "fastlio_cloud_align: waiting for odom origin from " << odomTopic_);
+        return false;
+    }
+
+    originPosition_ = pendingOriginPosition_;
+    originInitialized_ = true;
+    ROS_INFO_STREAM(std::fixed << std::setprecision(4)
+                    << "Cloud zero origin: origin xyz = ["
+                    << originPosition_.x() << ", "
+                    << originPosition_.y() << ", "
+                    << originPosition_.z() << "]");
+    return true;
 }
 
-void LidarToMavros::printStartupSummary(double mountX, double mountY, double mountZ,
-                                        double mountRoll, double mountPitch, double mountYaw,
-                                        double worldX, double worldY, double worldZ,
-                                        const AttitudeDeg &fixedRpy) const
+bool FastlioCloudAlign::getCloudTransform(tf2::Transform &worldAlign, tf2::Vector3 &origin)
+{
+    std::lock_guard<std::mutex> lock(stateMutex_);
+    if (!ensureOriginReady())
+    {
+        return false;
+    }
+
+    worldAlign = activeWorldAlign_;
+    origin = originPosition_;
+    return true;
+}
+
+bool FastlioCloudAlign::transformCloud(const sensor_msgs::PointCloud2 &input,
+                                       sensor_msgs::PointCloud2 &output,
+                                       const tf2::Transform &worldAlign,
+                                       const tf2::Vector3 &origin) const
+{
+    output = input;
+    output.header.frame_id = outputFrameId_;
+    output.header.stamp = input.header.stamp.isZero() ? ros::Time::now() : input.header.stamp;
+
+    try
+    {
+        sensor_msgs::PointCloud2Iterator<float> iterX(output, "x");
+        sensor_msgs::PointCloud2Iterator<float> iterY(output, "y");
+        sensor_msgs::PointCloud2Iterator<float> iterZ(output, "z");
+
+        for (; iterX != iterX.end(); ++iterX, ++iterY, ++iterZ)
+        {
+            const float x = *iterX;
+            const float y = *iterY;
+            const float z = *iterZ;
+
+            if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(z))
+            {
+                continue;
+            }
+
+            const tf2::Vector3 rawPoint(static_cast<double>(x),
+                                        static_cast<double>(y),
+                                        static_cast<double>(z));
+            const tf2::Vector3 alignedPoint = worldAlign * rawPoint - origin;
+            *iterX = static_cast<float>(alignedPoint.x());
+            *iterY = static_cast<float>(alignedPoint.y());
+            *iterZ = static_cast<float>(alignedPoint.z());
+        }
+    }
+    catch (const std::runtime_error &e)
+    {
+        ROS_ERROR_STREAM_THROTTLE(1.0, "fastlio_cloud_align: cannot transform cloud: " << e.what());
+        return false;
+    }
+
+    return true;
+}
+
+void FastlioCloudAlign::printStartupSummary(double worldX, double worldY, double worldZ,
+                                            const AttitudeDeg &fixedRpy) const
 {
     printLine();
-    ROS_INFO_STREAM("lidar_to_mavros startup config");
+    ROS_INFO_STREAM("fastlio_cloud_align startup config");
     ROS_INFO_STREAM("mode: " << alignModeName_
                     << "    zero_origin=" << (zeroOrigin_ ? "true" : "false")
                     << "    print_debug=" << (printDebug_ ? "true" : "false"));
-    ROS_INFO_STREAM("input: odom=" << odomTopic_
-                    << "    imu=" << imuTopic_);
-    ROS_INFO_STREAM("output: " << visionPoseTopic_
+    ROS_INFO_STREAM("input: cloud=" << cloudTopic_
+                    << "    imu=" << imuTopic_
+                    << "    odom=" << odomTopic_);
+    ROS_INFO_STREAM("output: " << alignedCloudTopic_
                     << "    frame_id=" << outputFrameId_);
-    ROS_INFO_STREAM(std::fixed << std::setprecision(4)
-                    << "mount extrinsic xyz=["
-                    << mountX << ", " << mountY << ", " << mountZ
-                    << "] m, rpy=["
-                    << radToDeg(mountRoll) << ", "
-                    << radToDeg(mountPitch) << ", "
-                    << radToDeg(mountYaw) << "] deg");
     ROS_INFO_STREAM(std::fixed << std::setprecision(4)
                     << "fixed world align xyz=["
                     << worldX << ", " << worldY << ", " << worldZ
@@ -549,94 +594,63 @@ void LidarToMavros::printStartupSummary(double mountX, double mountY, double mou
     printLine();
 }
 
-void LidarToMavros::printDebug(const geometry_msgs::PoseStamped &pose)
+void FastlioCloudAlign::printDebug(const sensor_msgs::PointCloud2 &output,
+                                   int transformedCount,
+                                   int skippedCount) const
 {
     static ros::Time lastPrintTime(0);
     const ros::Time now = ros::Time::now();
-    if (!lastPrintTime.isZero() && (now - lastPrintTime).toSec() < 0.2)
+    if (!lastPrintTime.isZero() && (now - lastPrintTime).toSec() < 1.0)
     {
         return;
     }
     lastPrintTime = now;
 
-    if (!consoleTablePrinted_)
-    {
-        std::cout << std::endl
-                  << "================ lidar_to_mavros live output ================" << std::endl
-                  << "mode: " << alignModeName_ << "    topic: " << visionPoseTopic_ << std::endl
-                  << "----------------------------------------------------------" << std::endl
-                  << "              output_pose              px4_local_pose" << std::endl;
-        consoleTablePrinted_ = true;
-    }
-
-    const double px4X = px4PoseReceived_ ? lastPx4Pose_.pose.position.x : 0.0;
-    const double px4Y = px4PoseReceived_ ? lastPx4Pose_.pose.position.y : 0.0;
-    const double px4Z = px4PoseReceived_ ? lastPx4Pose_.pose.position.z : 0.0;
-    const double px4Roll = px4PoseReceived_ ? px4Attitude_.roll : 0.0;
-    const double px4Pitch = px4PoseReceived_ ? px4Attitude_.pitch : 0.0;
-    const double px4Yaw = px4PoseReceived_ ? px4Attitude_.yaw : 0.0;
-
-    std::cout << "\033[8A";
-    std::cout << std::fixed << std::setprecision(4)
-              << "\033[Kx       " << std::setw(11) << pose.pose.position.x
-              << "              " << std::setw(11) << px4X << std::endl
-              << "\033[Ky       " << std::setw(11) << pose.pose.position.y
-              << "              " << std::setw(11) << px4Y << std::endl
-              << "\033[Kz       " << std::setw(11) << pose.pose.position.z
-              << "              " << std::setw(11) << px4Z << std::endl
-              << "\033[Kroll    " << std::setw(11) << estimatedAttitude_.roll
-              << "              " << std::setw(11) << px4Roll << " deg" << std::endl
-              << "\033[Kpitch   " << std::setw(11) << estimatedAttitude_.pitch
-              << "              " << std::setw(11) << px4Pitch << " deg" << std::endl
-              << "\033[Kyaw     " << std::setw(11) << estimatedAttitude_.yaw
-              << "              " << std::setw(11) << px4Yaw << " deg" << std::endl
-              << "\033[Kpx4: " << (px4PoseReceived_ ? "OK" : "waiting")
-              << "    zero_origin=" << (zeroOrigin_ ? "true" : "false")
-              << "    frame=" << outputFrameId_ << std::endl
-              << "\033[K----------------------------------------------------------" << std::endl;
+    ROS_INFO_STREAM("fastlio_cloud_align publish "
+                    << alignedCloudTopic_
+                    << " points=" << transformedCount
+                    << " skipped=" << skippedCount
+                    << " frame=" << output.header.frame_id
+                    << " zero_origin=" << (zeroOrigin_ ? "true" : "false"));
 }
 
-void LidarToMavros::spin()
+void FastlioCloudAlign::spin()
 {
-    ros::Rate rate(100);
+    ros::AsyncSpinner spinner(2);
+    spinner.start();
+
+    ros::Rate rate(10);
     while (ros::ok())
     {
-        if (!odomReceived_)
         {
-            if (!waitingOdomWarned_)
+            std::lock_guard<std::mutex> lock(stateMutex_);
+            if (!cloudReceived_ && !waitingCloudWarned_)
             {
-                ROS_WARN_STREAM("Waiting for odom: " << odomTopic_);
-                waitingOdomWarned_ = true;
+                ROS_WARN_STREAM("Waiting for cloud: " << cloudTopic_);
+                waitingCloudWarned_ = true;
             }
-        }
-        if (alignMode_ == AlignMode::IMU_AUTO && !imuReceived_)
-        {
-            if (!waitingImuWarned_)
+            if (alignMode_ == AlignMode::IMU_AUTO && !imuReceived_ && !waitingImuWarned_)
             {
                 ROS_WARN_STREAM("Waiting for imu: " << imuTopic_);
                 waitingImuWarned_ = true;
             }
-        }
-        if (alignMode_ == AlignMode::IMU_AUTO && imuReceived_ && !alignReady_)
-        {
-            if (!waitingAlignWarned_)
+            if (zeroOrigin_ && !odomReceived_ && !waitingOdomWarned_)
             {
-                ROS_INFO_STREAM("Waiting for IMU auto alignment lock...");
-                waitingAlignWarned_ = true;
+                ROS_WARN_STREAM("Waiting for odom origin: " << odomTopic_);
+                waitingOdomWarned_ = true;
             }
         }
-        ros::spinOnce();
         rate.sleep();
     }
 }
 
 int main(int argc, char **argv)
 {
-    ros::init(argc, argv, "lidar_to_mavros");
+    ros::init(argc, argv, "fastlio_cloud_align");
     ros::NodeHandle nh;
     ros::NodeHandle pnh("~");
 
-    LidarToMavros node(nh, pnh);
+    FastlioCloudAlign node(nh, pnh);
     node.spin();
     return 0;
 }
