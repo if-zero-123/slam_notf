@@ -1,0 +1,4 @@
+interface:
+  display_name: "MID360 PX4 IMU Calibration"
+  short_description: "Calibrate MID360 LiDAR to PX4/MAVROS IMU and write FAST-LIO extrinsics"
+  default_prompt: "Use $mid360-px4imu-calibration to deploy LI-Init, record a MID360 + PX4 IMU calibration bag, interpret the LiDAR-to-IMU result, and update FAST-LIO mid360.yaml."
