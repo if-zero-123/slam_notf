@@ -1,0 +1,19 @@
+[Unit]
+Description=Boot-safe RealSense D435 RGB and depth ROS launch
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=orangepi
+WorkingDirectory=/home/orangepi/ros_ws
+Environment=ROS_HOME=/home/orangepi/.ros
+ExecStartPre=+/home/orangepi/ros_ws/src/slam_notf/lidar_to_mavros/scripts/d435_usb_recover.sh
+ExecStart=/bin/bash -lc 'source /opt/ros/noetic/setup.bash && source /home/orangepi/ros_ws/devel/setup.bash && exec roslaunch lidar_to_mavros d435_rgb_depth.launch'
+Restart=on-failure
+RestartSec=5
+TimeoutStartSec=90
+KillSignal=SIGINT
+
+[Install]
+WantedBy=multi-user.target

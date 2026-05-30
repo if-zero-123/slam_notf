@@ -1,0 +1,64 @@
+<launch>
+    <!--
+        Direct FAST-LIO -> PX4 vision pose for MID360 using PX4/MAVROS raw IMU.
+
+        This launch assumes FAST-LIO is already configured with the calibrated
+        LiDAR -> PX4 IMU extrinsic, so no extra mount rotation is applied here.
+    -->
+
+    <arg name="rviz" default="false"/>
+    <arg name="fastlio_blind" default="0.2"/>
+
+    <arg name="odom_topic" default="/Odometry"/>
+    <arg name="imu_topic" default="/mavros/imu/data_raw"/>
+    <arg name="vision_pose_topic" default="/mavros/vision_pose/pose"/>
+
+    <arg name="zero_origin" default="true"/>
+    <arg name="print_debug" default="true"/>
+
+    <include file="$(find fast_lio)/launch/mapping_mid360_px4imu.launch">
+        <arg name="rviz" value="$(arg rviz)"/>
+        <arg name="blind" value="$(arg fastlio_blind)"/>
+    </include>
+
+    <!-- Enable FAST-LIO dynamic TF: camera_init -> body. -->
+    <param name="publish/tf_en" type="bool" value="true"/>
+
+    <!-- Complete the TF tree around FAST-LIO, MAVROS, MID360, and D435. -->
+    <node name="tf_map_to_odom" pkg="tf" type="static_transform_publisher"
+          args="0 0 0 0 0 0 map odom 100"/>
+    <node name="tf_odom_to_camera_init" pkg="tf" type="static_transform_publisher"
+          args="0 0 0 0 0 0 odom camera_init 100"/>
+    <node name="tf_body_to_base_link" pkg="tf" type="static_transform_publisher"
+          args="0 0 0 0 0 0 body base_link 100"/>
+    <node name="tf_base_link_to_livox_frame" pkg="tf" type="static_transform_publisher"
+          args="-0.008110 0.006676 0.155897 0.006386437 0.265772347 0.006017400 0.963995884 base_link livox_frame 100"/>
+    <node name="tf_base_link_to_camera_link" pkg="tf" type="static_transform_publisher"
+          args="0.12 0.0 0.05 0 0 0 base_link camera_link 100"/>
+
+    <node name="lidar_to_mavros" pkg="lidar_to_mavros" type="lidar_to_mavros" output="screen">
+        <param name="odom_topic" value="$(arg odom_topic)"/>
+        <param name="imu_topic" value="$(arg imu_topic)"/>
+        <param name="vision_pose_topic" value="$(arg vision_pose_topic)"/>
+        <param name="output_frame_id" value="odom"/>
+
+        <param name="mount_x" value="0.0"/>
+        <param name="mount_y" value="0.0"/>
+        <param name="mount_z" value="0.0"/>
+        <param name="mount_roll" value="0.0"/>
+        <param name="mount_pitch" value="0.0"/>
+        <param name="mount_yaw" value="0.0"/>
+
+        <param name="world_x" value="0.0"/>
+        <param name="world_y" value="0.0"/>
+        <param name="world_z" value="0.0"/>
+        <param name="world_roll" value="0.0"/>
+        <param name="world_pitch" value="0.0"/>
+        <param name="world_yaw" value="0.0"/>
+
+        <param name="align_mode" value="none"/>
+        <param name="zero_origin" value="$(arg zero_origin)"/>
+        <param name="print_debug" value="$(arg print_debug)"/>
+    </node>
+
+</launch>

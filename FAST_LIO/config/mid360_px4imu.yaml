@@ -1,0 +1,37 @@
+common:
+    lid_topic:  "/livox/lidar"
+    imu_topic:  "/mavros/imu/data_raw"
+    imu_acc_scale: 1.0          # MAVROS/PX4 IMU acceleration is already in m/s^2.
+    time_sync_en: false         # ONLY turn on when external time synchronization is really not possible
+    time_offset_lidar_to_imu: -0.020980 # LI-Init: Time Lag IMU to LiDAR (second)
+
+preprocess:
+    lidar_type: 1                # 1 for Livox serials LiDAR, 2 for Velodyne LiDAR, 3 for ouster LiDAR,
+    scan_line: 4
+    blind: 0.35
+
+mapping:
+    acc_cov: 0.5
+    gyr_cov: 0.5
+    b_acc_cov: 0.0005
+    b_gyr_cov: 0.0005
+    fov_degree:    360
+    det_range:     100.0
+    extrinsic_est_en:  false
+    # LI-Init refinement result, transform from LiDAR frame to PX4 IMU frame:
+    # p_imu = extrinsic_R * p_lidar + extrinsic_T
+    extrinsic_T: [ -0.008110, 0.006676, 0.155897 ]
+    extrinsic_R: [ 0.858658, -0.008207,  0.512484,
+                   0.014996,  0.999846, -0.009115,
+                  -0.512330,  0.015511,  0.858649 ]
+
+publish:
+    path_en:  false
+    scan_publish_en:  true
+    dense_publish_en: true
+    scan_bodyframe_pub_en: true
+    tf_en: false
+
+pcd_save:
+    pcd_save_en: false
+    interval: -1

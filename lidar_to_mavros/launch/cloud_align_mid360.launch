@@ -9,7 +9,7 @@
         这样即使点云很大，也不会阻塞 lidar_to_mavros 的位姿发送链路。
 
         三种模式：
-        - imu_auto：默认，启动时静止采样 /livox/imu，自动计算 roll/pitch 旋转补偿，yaw 不补偿。
+        - imu_auto：启动时静止采样 IMU，自动计算 roll/pitch 旋转补偿，yaw 不补偿。
         - fixed：使用 world_roll/world_pitch/world_yaw 固定角度补偿。
         - none：不旋转，只按 zero_origin 决定是否平移归零，用于对照原始 FAST-LIO 点云。
 
@@ -22,12 +22,12 @@
     <!-- 输入/输出 topic。 -->
     <arg name="cloud_topic" default="/cloud_registered"/>
     <arg name="aligned_cloud_topic" default="/cloud_registered_aligned"/>
-    <arg name="imu_topic" default="/livox/imu"/>
-    <arg name="odom_topic" default="/Odom_high_freq"/>
+    <arg name="imu_topic" default="/mavros/imu/data_raw"/>
+    <arg name="odom_topic" default="/Odometry"/>
     <arg name="output_frame_id" default="world"/>
 
-    <!-- 坐标旋转模式：imu_auto=自动；fixed=固定角；none=不旋转。 -->
-    <arg name="align_mode" default="imu_auto"/>
+    <!-- 坐标旋转模式：PX4 IMU 外参已写入 FAST-LIO 时用 none，不再额外旋转点云。 -->
+    <arg name="align_mode" default="none"/>
 
     <!-- 固定角补偿参数。只有 align_mode:=fixed 时使用。 -->
     <arg name="world_x" default="0.0"/>

@@ -77,6 +77,7 @@ float res_last[100000] = {0.0};
 float DET_RANGE = 300.0f;
 const float MOV_THRESHOLD = 1.5f;
 double time_diff_lidar_to_imu = 0.0;
+double imu_acc_scale = G_m_s2;
 
 mutex mtx_buffer;
 condition_variable sig_buffer;
@@ -391,9 +392,9 @@ void imu_cbk(const sensor_msgs::Imu::ConstPtr &msg_in)
     // cout<<"IMU got at: "<<msg_in->header.stamp.toSec()<<endl;
     sensor_msgs::Imu::Ptr msg(new sensor_msgs::Imu(*msg_in));
 
-    msg->linear_acceleration.x *= G_m_s2;
-    msg->linear_acceleration.y *= G_m_s2;
-    msg->linear_acceleration.z *= G_m_s2;
+    msg->linear_acceleration.x *= imu_acc_scale;
+    msg->linear_acceleration.y *= imu_acc_scale;
+    msg->linear_acceleration.z *= imu_acc_scale;
 
     if(init)
     {
@@ -829,6 +830,7 @@ int main(int argc, char** argv)
     nh.param<string>("common/imu_topic", imu_topic,"/livox/imu");
     nh.param<bool>("common/time_sync_en", time_sync_en, false);
     nh.param<double>("common/time_offset_lidar_to_imu", time_diff_lidar_to_imu, 0.0);
+    nh.param<double>("common/imu_acc_scale", imu_acc_scale, double(G_m_s2));
     nh.param<double>("filter_size_corner",filter_size_corner_min,0.5);
     nh.param<double>("filter_size_surf",filter_size_surf_min,0.5);
     nh.param<double>("filter_size_map",filter_size_map_min,0.5);
